@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>作図アプリ</title>
+<style>
+  :root {
+    --primary: #2563eb; /* 鮮やかな青 */
+    --active-bg: #2563eb;
+    --active-text: #ffffff;
+    --panel-bg: #ffffff;
+    --text: #334155;
+    --border: #e2e8f0;
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  }
+
+  body {
+    margin: 0;
+    height: 100vh;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #f8fafc;
+    color: var(--text);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* キャンバス */
+  #canvas-container {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    touch-action: none;
+    z-index: 1;
+  }
+
+  /* 共通パネルスタイル */
+  .panel {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    border-radius: 8px;
+    padding: 6px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    z-index: 10;
+  }
+
+  /* 上部ツールバー */
+  .top-bar {
+    top: 20px;
+  }
+
+  /* 下部半径バー */
+  .bottom-bar {
+    bottom: 30px;
+  }
+
+  /* ボタン共通 */
+  button {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all 0.2s;
+  }
+
+  button:hover {
+    background-color: #f1f5f9;
+  }
+
+  /* アクティブなボタン */
+  button.active {
+    background-color: var(--active-bg);
+    color: var(--active-text);
+  }
+
+  /* 区切り線 */
+  .divider {
+    width: 1px;
+    height: 24px;
+    background-color: var(--border);
+    margin: 0 4px;
+  }
+
+  /* アイコン風装飾 */
+  .icon { font-size: 1.1em; line-height: 1; }
+
+  /* 半径ボタン専用スタイル */
+  .radius-btn {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+  }
+  .radius-btn.active {
+    border-color: var(--primary);
+  }
+  .radius-label {
+    font-size: 13px;
+    font-weight: bold;
+    margin-right: 4px;
+    color: #64748b;
+  }
+
+  /* ガイドメッセージ */
+  #msg {
+    position: absolute;
+    bottom: 90px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 23, 42, 0.8);
+    color: #fff;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+    z-index: 20;
+    white-space: nowrap;
+  }
+  #msg.show { opacity: 1; }
+
+</style>
+</head>
+<body>
+
+<div id="canvas-container">
+  <canvas id="cv"></canvas>
+</div>
+
+<div class="panel top-bar" id="modeGroup">
+  <button data-mode="compass" class="active">
+    <span class="icon">◎</span> コンパス
+  </button>
+  <button data-mode="ruler">
+    <span class="icon">📏</span> 定規
+  </button>
+  <button data-mode="point">
+    <span class="icon">●</span> 点
+  </button>
+  <button data-mode="erase">
+    <span class="icon">✕</span> 消去
+  </button>
+  
+  <div class="divider"></div>
+  
+  <button id="undoBtn">戻る</button>
+  <button id="resetBtn">全消去</button>
+</div>
+
+<div class="panel bottom-bar" id="radiusControls">
+  <span class="radius-label">コンパス半径:</span>
+  <button class="radius-btn" data-val="1">1</button>
+  <button class="radius-btn" data-val="2">2</button>
+  <button class="radius-btn active" data-val="3">3</button>
+  <button class="radius-btn" data-val="4">4</button>
+  <button class="radius-btn" data-val="5">5</button>
+</div>
+
+<div id="msg"></div>
+
+<script>
+(() => {
+  // --- 設定 ---
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d', { alpha: false });
+  const DPR = Math.max(1, window.devicePixelRatio || 1);
+
+  // --- アプリ状態 ---
+  let mode = 'compass';
+  let history = [];
+  let objects = { points: [], lines: [], arcs: [] };
+
+  // --- コンパス状態 ---
+  let center = null;
+  let radiusSteps = [60, 100, 150, 220, 300]; // 半径(px)
+  let radius = radiusSteps[2];
+  let compassAngle = -Math.PI / 2;
+  let isDraggingArm = false;
+
+  // --- その他ツール状態 ---
+  let dragStart = null;
+  let pointerPos = { x: 0, y: 0 };
+
+  // --- 初期化 ---
+  function init() {
+    const resize = () => {
+      const p = cv.parentElement;
+      cv.width = p.clientWidth * DPR;
+      cv.height = p.clientHeight * DPR;
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      draw();
+    };
+    window.addEventListener('resize', resize);
+    resize();
+    showMsg('中心をクリックして配置');
+  }
+
+  // --- ユーティリティ ---
+  function getPos(e) {
+    const r = cv.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: cx - r.left, y: cy - r.top };
+  }
+
+  function showMsg(text) {
+    const el = document.getElementById('msg');
+    el.innerText = text;
+    el.classList.add('show');
+    clearTimeout(el.timer);
+    el.timer = setTimeout(() => el.classList.remove('show'), 2500);
+  }
+
+  function saveHistory() {
+    if (history.length > 50) history.shift();
+    history.push(JSON.stringify(objects));
+  }
+
+  // --- UIイベント ---
+  // モード切替
+  document.querySelectorAll('#modeGroup button[data-mode]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#modeGroup button[data-mode]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      mode = btn.dataset.mode;
+      
+      // リセット処理
+      dragStart = null;
+      isDraggingArm = false;
+      if (mode !== 'compass') center = null;
+
+      // ガイド
+      if(mode === 'compass') showMsg('中心をクリックして配置');
+      else if(mode === 'ruler') showMsg('ドラッグして線を引く');
+      
+      draw();
+    });
+  });
+
+  // 半径切替
+  document.querySelectorAll('#radiusControls button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#radiusControls button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const val = parseInt(btn.dataset.val);
+      radius = radiusSteps[val - 1];
+      
+      // コンパス配置済みなら角度リセット
+      if (mode === 'compass' && center) compassAngle = -Math.PI / 2;
+      draw();
+    });
+  });
+
+  // 戻る・全消去
+  document.getElementById('undoBtn').onclick = () => {
+    if (history.length) {
+      objects = JSON.parse(history.pop());
+      center = null;
+      draw();
+    }
+  };
+  document.getElementById('resetBtn').onclick = () => {
+    saveHistory();
+    objects = { points: [], lines: [], arcs: [] };
+    center = null;
+    draw();
+  };
+
+  // --- メインロジック (Geometry Logic) ---
+
+  function handleDown(p) {
+    cv.setPointerCapture(1);
+
+    if (mode === 'point') {
+      saveHistory();
+      objects.points.push(p);
+    } 
+    else if (mode === 'ruler') {
+      dragStart = p;
+    }
+    else if (mode === 'compass') {
+      if (!center) {
+        // 配置
+        center = p;
+        compassAngle = -Math.PI / 2;
+        showMsg("先端(●)をつかんで回す");
+      } else {
+        // 操作判定
+        const tipX = center.x + radius * Math.cos(compassAngle);
+        const tipY = center.y + radius * Math.sin(compassAngle);
+        const dist = Math.hypot(p.x - tipX, p.y - tipY);
+
+        if (dist < 40) { // 判定少し広め
+          isDraggingArm = true;
+          saveHistory();
+        } else {
+          // 再配置
+          center = p;
+          compassAngle = -Math.PI / 2;
+          showMsg("コンパスを移動しました");
+        }
+      }
+    }
+    else if (mode === 'erase') {
+      tryErase(p);
+    }
+    draw();
+  }
+
+  function handleMove(p) {
+    pointerPos = p;
+
+    // カーソル
+    if (mode === 'compass' && center) {
+      const tipX = center.x + radius * Math.cos(compassAngle);
+      const tipY = center.y + radius * Math.sin(compassAngle);
+      const dist = Math.hypot(p.x - tipX, p.y - tipY);
+      cv.style.cursor = dist < 40 ? 'move' : 'default';
+    } else {
+      cv.style.cursor = 'crosshair';
+    }
+
+    // 描画処理
+    if (mode === 'compass' && center && isDraggingArm) {
+      const newAngle = Math.atan2(p.y - center.y, p.x - center.x);
+      
+      let diff = newAngle - compassAngle;
+      while (diff <= -Math.PI) diff += 2 * Math.PI;
+      while (diff > Math.PI) diff -= 2 * Math.PI;
+
+      // 飛び値防止
+      if (Math.abs(diff) < 1.5) {
+        const ccw = diff < 0;
+        objects.arcs.push({
+          cx: center.x, cy: center.y, r: radius,
+          s: compassAngle,
+          e: newAngle,
+          ccw: ccw
+        });
+        compassAngle = newAngle;
+      }
+    }
+    draw();
+  }
+
+  function handleUp() {
+    if (mode === 'ruler' && dragStart) {
+      saveHistory();
+      objects.lines.push({ x1: dragStart.x, y1: dragStart.y, x2: pointerPos.x, y2: pointerPos.y });
+      dragStart = null;
+    }
+    isDraggingArm = false;
+    draw();
+  }
+
+  // --- 消去ロジック ---
+  function tryErase(p) {
+    const t = 15;
+    // 点
+    const pi = objects.points.findIndex(pt => Math.hypot(pt.x - p.x, pt.y - p.y) < t);
+    if (pi >= 0) { saveHistory(); objects.points.splice(pi, 1); return; }
+    // 線
+    const li = objects.lines.findIndex(l => distPtSeg(p, l) < t);
+    if (li >= 0) { saveHistory(); objects.lines.splice(li, 1); return; }
+    // 円弧
+    const ai = objects.arcs.findIndex(a => Math.abs(Math.hypot(p.x - a.cx, p.y - a.cy) - a.r) < t);
+    if (ai >= 0) {
+      saveHistory();
+      const target = objects.arcs[ai];
+      // 同一円弧削除
+      objects.arcs = objects.arcs.filter(a =>
+        !(Math.hypot(a.cx - target.cx, a.cy - target.cy) < 2 && Math.abs(a.r - target.r) < 2)
+      );
+    }
+  }
+
+  function distPtSeg(p, l) {
+    const dx = l.x2 - l.x1, dy = l.y2 - l.y1;
+    if (dx === 0 && dy === 0) return Math.hypot(p.x - l.x1, p.y - l.y1);
+    let t = ((p.x - l.x1) * dx + (p.y - l.y1) * dy) / (dx * dx + dy * dy);
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(p.x - (l.x1 + t * dx), p.y - (l.y1 + t * dy));
+  }
+
+  // --- 描画ループ ---
+  function draw() {
+    const w = cv.width / DPR;
+    const h = cv.height / DPR;
+    
+    // 1. 背景クリア & グリッド描画
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    drawGrid(w, h);
+
+    // 2. 円弧
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#000';
+    ctx.beginPath();
+    for (const a of objects.arcs) {
+      ctx.moveTo(a.cx + a.r * Math.cos(a.s), a.cy + a.r * Math.sin(a.s));
+      ctx.arc(a.cx, a.cy, a.r, a.s, a.e, a.ccw);
+    }
+    ctx.stroke();
+
+    // 3. 直線
+    ctx.strokeStyle = '#1e293b';
+    ctx.beginPath();
+    for (const l of objects.lines) {
+      ctx.moveTo(l.x1, l.y1);
+      ctx.lineTo(l.x2, l.y2);
+    }
+    ctx.stroke();
+
+    // 4. 点
+    ctx.fillStyle = '#1e293b';
+    for (const p of objects.points) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 5. プレビュー (定規)
+    if (mode === 'ruler' && dragStart) {
+      ctx.strokeStyle = '#94a3b8';
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(dragStart.x, dragStart.y);
+      ctx.lineTo(pointerPos.x, pointerPos.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // 6. プレビュー (コンパスツール)
+    if (mode === 'compass' && center) {
+      drawCompassTool();
+    }
+  }
+
+  function drawGrid(w, h) {
+    ctx.save();
+    ctx.strokeStyle = '#e2e8f0'; // 薄いグレー
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const step = 40;
+    for (let x = 0; x <= w; x += step) {
+      ctx.moveTo(x, 0); ctx.lineTo(x, h);
+    }
+    for (let y = 0; y <= h; y += step) {
+      ctx.moveTo(0, y); ctx.lineTo(w, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawCompassTool() {
+    const cx = center.x, cy = center.y;
+    const tipX = cx + radius * Math.cos(compassAngle);
+    const tipY = cy + radius * Math.sin(compassAngle);
+
+    // 点線ガイド
+    ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 針
+    ctx.fillStyle = '#ef4444'; // 赤
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 脚
+    const grad = ctx.createLinearGradient(cx, cy, tipX, tipY);
+    grad.addColorStop(0, '#cbd5e1');
+    grad.addColorStop(1, '#334155');
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+
+    // つまみ (UIカラーに合わせる)
+    ctx.fillStyle = isDraggingArm ? '#2563eb' : '#475569';
+    ctx.beginPath();
+    ctx.arc(tipX, tipY, isDraggingArm ? 8 : 6, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // トップ
+    ctx.fillStyle = '#64748b';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // --- イベントリスナー ---
+  cv.addEventListener('pointerdown', e => { e.preventDefault(); handleDown(getPos(e)); });
+  cv.addEventListener('pointermove', e => { e.preventDefault(); handleMove(getPos(e)); });
+  cv.addEventListener('pointerup', e => { e.preventDefault(); handleUp(); });
+  cv.addEventListener('pointercancel', e => { e.preventDefault(); handleUp(); });
+
+  init();
+})();
+</script>
+</body>
+</html>
